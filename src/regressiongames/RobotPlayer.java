@@ -1,13 +1,20 @@
-package examplefuncsplayer;
+package regressiongames;
 
 import battlecode.common.*;
 
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
+import java.util.*;
+
+class Tuple<K, V> {
+
+    public K first;
+    public V last;
+
+    public Tuple(K first, V last) {
+        this.first = first;
+        this.last = last;
+    }
+
+}
 
 /**
  * RobotPlayer.java is the class that describes your main robot strategy.
@@ -29,19 +36,26 @@ public strictfp class RobotPlayer {
      * import at the top of this file. Here, we *seed* the RNG with a constant number (6147); this makes sure
      * we get the same sequence of numbers every time this code is run. This is very useful for debugging!
      */
-    static final Random rng = new Random(6147);
+    static final Random rng = new Random();
 
     /** Array containing all the possible movement directions. */
     static final Direction[] directions = {
-        Direction.NORTH,
-        Direction.NORTHEAST,
-        Direction.EAST,
-        Direction.SOUTHEAST,
-        Direction.SOUTH,
-        Direction.SOUTHWEST,
-        Direction.WEST,
-        Direction.NORTHWEST,
+            Direction.NORTH,
+            Direction.NORTHEAST,
+            Direction.EAST,
+            Direction.SOUTHEAST,
+            Direction.SOUTH,
+            Direction.SOUTHWEST,
+            Direction.WEST,
+            Direction.NORTHWEST,
     };
+
+    static MapLocation myHQ = null;
+
+    static MapLocation lastLocation = null;
+    static Integer lastLocationCount = null;
+
+    static Integer lastAnchorTime = 0;
 
     /**
      * run() is the method that is called when a robot is instantiated in the Battlecode world.
@@ -57,8 +71,12 @@ public strictfp class RobotPlayer {
         // Everything you say here will be directly viewable in your terminal when you run a match!
         System.out.println("I'm a " + rc.getType() + " and I just got created! I have health " + rc.getHealth());
 
-        // You can also use indicators to save debug notes in replays.
-        rc.setIndicatorString("Hello world!");
+        if (myHQ == null) {
+            List<MapLocation> hqs = getNearbyHQLocations(rc);
+            if (hqs.size() > 0) {
+                myHQ = hqs.get(0);
+            }
+        }
 
         while (true) {
             // This code runs during the entire lifespan of the robot, which is why it is in an infinite
@@ -106,6 +124,42 @@ public strictfp class RobotPlayer {
         // Your code should never reach here (unless it's intentional)! Self-destruction imminent...
     }
 
+    static boolean isInventoryFull(RobotController rc) {
+        int totalAmount = 0;
+        for (ResourceType t: ResourceType.values()) {
+            totalAmount += rc.getResourceAmount(t);
+        }
+        return totalAmount >= 40;
+    }
+
+    static boolean hasInventory(RobotController rc) {
+        int totalAmount = 0;
+        for (ResourceType t: ResourceType.values()) {
+            totalAmount += rc.getResourceAmount(t);
+        }
+        return totalAmount > 0;
+    }
+
+    static Tuple getNextDepositable(RobotController rc) {
+        for (ResourceType t: ResourceType.values()) {
+            int amount = rc.getResourceAmount(t);
+            if( amount > 0) {
+                return new Tuple(t, amount);
+            }
+        }
+        return null;
+    }
+
+    static List<MapLocation> getNearbyHQLocations(RobotController rc) throws GameActionException {
+        List<MapLocation> c = new ArrayList<>();
+        for (RobotInfo r : rc.senseNearbyRobots(-1, rc.getTeam())) {
+            if (r.getType() == RobotType.HEADQUARTERS) {
+                c.add(r.location);
+            }
+        }
+        return c;
+    }
+
     /**
      * Run a single turn for a Headquarters.
      * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
@@ -114,23 +168,16 @@ public strictfp class RobotPlayer {
         // Pick a direction to build in.
         Direction dir = directions[rng.nextInt(directions.length)];
         MapLocation newLoc = rc.getLocation().add(dir);
-        if (rc.canBuildAnchor(Anchor.STANDARD)) {
-            // If we can build an anchor do it!
+
+        if (rc.canBuildAnchor(Anchor.STANDARD) && rc.getResourceAmount(ResourceType.ADAMANTIUM) > 100 && rc.getResourceAmount(ResourceType.MANA) > 100 && rc.getNumAnchors(Anchor.STANDARD) < 1 && turnCount > 350 && (turnCount - lastAnchorTime) > 300) {
+            rc.setIndicatorString("BUILDING AN ANCHOR");
             rc.buildAnchor(Anchor.STANDARD);
-            rc.setIndicatorString("Building anchor! " + rc.getAnchor());
+            lastAnchorTime = turnCount;
         }
-        if (rng.nextBoolean()) {
-            // Let's try to build a carrier.
-            rc.setIndicatorString("Trying to build a carrier");
-            if (rc.canBuildRobot(RobotType.CARRIER, newLoc)) {
-                rc.buildRobot(RobotType.CARRIER, newLoc);
-            }
-        } else {
-            // Let's try to build a launcher.
-            rc.setIndicatorString("Trying to build a launcher");
-            if (rc.canBuildRobot(RobotType.LAUNCHER, newLoc)) {
-                rc.buildRobot(RobotType.LAUNCHER, newLoc);
-            }
+
+        if (rc.canBuildRobot(RobotType.CARRIER, newLoc) && (turnCount < 250 || rc.getResourceAmount(ResourceType.ADAMANTIUM) > 110) && rng.nextFloat() > 0.5) {
+            rc.setIndicatorString("BUILDING A CARRIER");
+            rc.buildRobot(RobotType.CARRIER, newLoc);
         }
     }
 
@@ -139,61 +186,100 @@ public strictfp class RobotPlayer {
      * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
      */
     static void runCarrier(RobotController rc) throws GameActionException {
-        if (rc.getAnchor() != null) {
-            // If I have an anchor singularly focus on getting it to the first island I see
-            int[] islands = rc.senseNearbyIslands();
-            Set<MapLocation> islandLocs = new HashSet<>();
-            for (int id : islands) {
-                MapLocation[] thisIslandLocs = rc.senseNearbyIslandLocations(id);
-                islandLocs.addAll(Arrays.asList(thisIslandLocs));
+        MapLocation me = rc.getLocation();
+
+        if (myHQ != null) {
+            Tuple<ResourceType, Integer> depositable = getNextDepositable(rc);
+            if (depositable != null && rc.canTransferResource(myHQ, depositable.first, depositable.last)) {
+                rc.transferResource(myHQ, depositable.first, depositable.last);
             }
-            if (islandLocs.size() > 0) {
-                MapLocation islandLocation = islandLocs.iterator().next();
-                rc.setIndicatorString("Moving my anchor towards " + islandLocation);
-                while (!rc.getLocation().equals(islandLocation)) {
-                    Direction dir = rc.getLocation().directionTo(islandLocation);
-                    if (rc.canMove(dir)) {
-                        rc.move(dir);
-                    }
+
+            // If empty, near an HQ, and the HQ has an anchor, grab it
+            if (rc.canTakeAnchor(myHQ, Anchor.STANDARD)) {
+                rc.takeAnchor(myHQ, Anchor.STANDARD);
+            }
+        }
+
+        if (rc.getAnchor() != null) {
+            rc.setIndicatorString("IM CARRYING AN ANCHOR! Wandering until I find an island");
+            // Find an island, or wander around
+            if(rc.canPlaceAnchor() && rc.senseAnchor(rc.senseIsland(me)) == null) {
+                rc.placeAnchor();
+                return;
+            }
+            int[] islands = rc.senseNearbyIslands();
+            for (int island : islands) {
+                if (rc.senseAnchor(island) != null) {
+                    continue;
                 }
-                if (rc.canPlaceAnchor()) {
-                    rc.setIndicatorString("Huzzah, placed anchor!");
-                    rc.placeAnchor();
+                MapLocation[] locations = rc.senseNearbyIslandLocations(island);
+                for (MapLocation l : locations) {
+                    Direction dir = me.directionTo(l);
+                    if (rc.canMove(dir))
+                        rc.move(dir);
+                    return;
+                }
+            }
+            Direction dir = directions[rng.nextInt(directions.length)];
+            if (rc.canMove(dir)) {
+                rc.move(dir);
+            }
+            return;
+        }
+
+
+        if (lastLocation == null) {
+            lastLocation = me;
+            lastLocationCount = 0;
+        } else {
+            if (me == lastLocation) {
+                lastLocationCount += 1;
+            } else {
+                lastLocation = me;
+                lastLocationCount = 0;
+            }
+            if (lastLocationCount > 5) {
+                Direction dir = directions[rng.nextInt(directions.length)];
+                if (rc.canMove(dir)) {
+                    rc.move(dir);
                 }
             }
         }
+        if (isInventoryFull(rc) && myHQ != null) {
+            Direction dir = me.directionTo(myHQ);
+            if (rc.canMove(dir))
+                rc.move(dir);
+            return;
+        }
         // Try to gather from squares around us.
-        MapLocation me = rc.getLocation();
         for (int dx = -1; dx <= 1; dx++) {
             for (int dy = -1; dy <= 1; dy++) {
                 MapLocation wellLocation = new MapLocation(me.x + dx, me.y + dy);
                 if (rc.canCollectResource(wellLocation, -1)) {
                     if (rng.nextBoolean()) {
                         rc.collectResource(wellLocation, -1);
-                        rc.setIndicatorString("Collecting, now have, AD:" + 
-                            rc.getResourceAmount(ResourceType.ADAMANTIUM) + 
-                            " MN: " + rc.getResourceAmount(ResourceType.MANA) + 
-                            " EX: " + rc.getResourceAmount(ResourceType.ELIXIR));
+                        rc.setIndicatorString("Collecting, now have, AD:" +
+                                rc.getResourceAmount(ResourceType.ADAMANTIUM) +
+                                " MN: " + rc.getResourceAmount(ResourceType.MANA) +
+                                " EX: " + rc.getResourceAmount(ResourceType.ELIXIR));
                     }
                 }
             }
         }
-        // Occasionally try out the carriers attack
-        if (rng.nextInt(20) == 1) {
-            RobotInfo[] enemyRobots = rc.senseNearbyRobots(-1, rc.getTeam().opponent());
-            if (enemyRobots.length > 0) {
-                if (rc.canAttack(enemyRobots[0].location)) {
-                    rc.attack(enemyRobots[0].location);
-                }
+        // Try out the carriers attack
+        RobotInfo[] enemyRobots = rc.senseNearbyRobots(-1, rc.getTeam().opponent());
+        if (enemyRobots.length > 0) {
+            if (rc.canAttack(enemyRobots[0].location)) {
+                rc.attack(enemyRobots[0].location);
             }
         }
-        
+
         // If we can see a well, move towards it
         WellInfo[] wells = rc.senseNearbyWells();
-        if (wells.length > 1 && rng.nextInt(3) == 1) {
+        if (wells.length > 1) {
             WellInfo well_one = wells[1];
             Direction dir = me.directionTo(well_one.getMapLocation());
-            if (rc.canMove(dir)) 
+            if (rc.canMove(dir))
                 rc.move(dir);
         }
         // Also try to move randomly.
@@ -217,7 +303,7 @@ public strictfp class RobotPlayer {
             MapLocation toAttack = rc.getLocation().add(Direction.EAST);
 
             if (rc.canAttack(toAttack)) {
-                rc.setIndicatorString("Attacking");        
+                rc.setIndicatorString("Attacking");
                 rc.attack(toAttack);
             }
         }
